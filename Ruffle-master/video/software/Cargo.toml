@@ -1,0 +1,32 @@
+[package]
+name = "ruffle_video_software"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ruffle_render = { path = "../../render" }
+ruffle_video = { path = ".." }
+swf = { path = "../../swf" }
+slotmap = { workspace = true }
+thiserror = { workspace = true }
+flate2 = { workspace = true }
+log = { workspace = true }
+
+h263-rs = { path = "D:/ruffle-src/deps/h263-rs/h263-rs-27ee833ca97aadd2a14cf0b3b4ec8b53f31ff6bd/h263", optional = true }
+h263-rs-deblock = { path = "D:/ruffle-src/deps/h263-rs/h263-rs-27ee833ca97aadd2a14cf0b3b4ec8b53f31ff6bd/deblock", optional = true }
+nihav_core = { path = "D:/ruffle-src/deps/nihav-vp6/nihav-vp6-12d0bdf10a85641dc2de3d6900c747894431ed77/nihav-core", optional = true }
+nihav_codec_support = { path = "D:/ruffle-src/deps/nihav-vp6/nihav-vp6-12d0bdf10a85641dc2de3d6900c747894431ed77/nihav-codec-support", optional = true }
+nihav_duck = { path = "D:/ruffle-src/deps/nihav-vp6/nihav-vp6-12d0bdf10a85641dc2de3d6900c747894431ed77/nihav-duck", optional = true }
+
+[features]
+default = ["h263", "vp6", "screenvideo"]
+h263 = ["h263-rs", "h263-rs-deblock"]
+vp6 = ["nihav_core", "nihav_codec_support", "nihav_duck"]
+screenvideo = []

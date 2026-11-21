@@ -1,0 +1,28 @@
+# 构建产物
+build/
+target/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+*.pfx
+
+# 签名密钥与口令
+**/androidkey.jks
+**/*.keystore
+**/*.p12
+
+# IDE / 系统
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# 测试 / 临时
+tools/smoke/
+tools/input/
+*.tmp

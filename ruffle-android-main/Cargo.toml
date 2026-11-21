@@ -1,0 +1,79 @@
+[package]
+# Underscore because the cargo-ndk gradle plugin doesn't transform a hyphen to it.
+name = "ruffle_android"
+version = "0.1.0"
+authors = [
+    "Ruffle contributors <ruffle@ruffle.rs>",
+    "TÖRÖK Attila <torokati44@gmail.com>",
+    "Nathan Adams <dinnerbone@dinnerbone.com>",
+]
+edition = "2018"
+resolver = "2"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+strip = "symbols"
+
+[dependencies]
+
+android-activity = { version = "0.6.1", features = ["game-activity"] }
+android_logger = "0.15.1"
+
+jni = "0.22.4"
+# reqwest (via ruffle_frontend_utils' `rustls-tls`) verifies certificates with this,
+# which on Android needs to be initialized, and its Kotlin component included.
+# Keep it semver-compatible with the version reqwest uses, so they share a copy.
+rustls-platform-verifier = "0.7.1"
+# ruffle_frontend_utils' `rustls-tls` doesn't include a crypto provider for reqwest,
+# so we have to install one. Using `ring`, because `aws-lc-rs` needs CMake to build.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
+ndk = { version = "0.9.0" }
+
+# Have to follow Ruffle with this.
+wgpu = "30.0.1"
+
+# Local checkout instead of `git = ...` so cargo never has to clone the large
+# Ruffle repository through the slow network here.
+ruffle_common = { path = "D:/ruffle-src/Ruffle-master/core/common" }
+ruffle_core = { path = "D:/ruffle-src/Ruffle-master/core", features = [
+    "audio",
+    "mp3",
+    "aac",
+    "nellymoser",
+    "lzma",
+    "jpegxr",
+    "default_compatibility_rules",
+    "default_font",
+] }
+ruffle_render_wgpu = { path = "D:/ruffle-src/Ruffle-master/render/wgpu" }
+ruffle_video_software = { path = "D:/ruffle-src/Ruffle-master/video/software" }
+ruffle_frontend_utils = { path = "D:/ruffle-src/Ruffle-master/frontend-utils", default-features = false, features = ["fs", "navigator", "rustls-tls"] }
+
+log = "0.4.32"
+
+# Redirect tracing to log
+tracing = {version = "0.1.44", features = ["log", "log-always"]}
+backtrace = "0.3.76"
+async-task = "4.7.1"
+
+url = "2.5.2"
+webbrowser = "1.2.4"
+
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"]}
+
+[features]
+# AAudio (ndk's audio bindings) needs Android 8.0 / API 26 or newer; leave it off for
+# builds that must also load on Android 6-7 (where libaaudio.so does not exist).
+aaudio = ["ndk/audio"]
+jpegxr = ["ruffle_core/jpegxr"]
+
+# android-activity 0.6.1's bundled GameActivity.cpp resolves Configuration.getLocales()
+# and android.os.LocaleList while registering its JNI bindings. Both arrived in Android 7.0
+# (API 24), so on Android 6.0 the lookup fails and GameActivity aborts the process.
+# The vendored copy keeps that behaviour for API >= 24 and falls back to
+# Configuration.getLocale() below it; see vendor/android-activity/.../GameActivity.cpp.
+[patch.crates-io]
+android-activity = { path = "vendor/android-activity" }
