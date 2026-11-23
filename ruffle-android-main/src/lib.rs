@@ -141,6 +141,9 @@ async fn run(app: AndroidApp) {
     let (sender, receiver) = mpsc::channel::<RuffleEvent>();
     let mut native_window: Option<ndk::native_window::NativeWindow> = None;
     let mut playerbox: Option<ActivePlayer> = None;
+    // Android rotations on this platform don't reliably deliver InitWindow/WindowResized
+    // to us, so we watch the native window size ourselves and repaint when it changes.
+    let mut last_win_size: (i32, i32) = (0, 0);
     let sender = EventSender {
         sender,
         waker: app.create_waker(),
@@ -170,9 +173,18 @@ async fn run(app: AndroidApp) {
         let mut needs_redraw = false;
         app.poll_events(
             Some(
+                // Compute how long until the next frame *from now*. Using
+                // last_frame_time here (as before) yields an interval that can be far in
+                // the future; `as_millis() as i32` then overflows to a huge/negative
+                // value which ALooper_pollOnce treats as "block indefinitely". That made
+                // the loop wake only every 12-17s, so the picture appeared frozen.
                 next_frame_time
-                    .and_then(|next| next.checked_duration_since(last_frame_time))
-                    .unwrap_or_else(|| Duration::from_millis(100)),
+                    .and_then(|next| next.checked_duration_since(Instant::now()))
+                    .unwrap_or_else(|| Duration::from_millis(100))
+                    // Floor: a static movie reports 0 and we'd otherwise busy-spin.
+                    .max(Duration::from_millis(4))
+                    // Ceiling: never sleep so long that we look frozen.
+                    .min(Duration::from_millis(100)),
             ),
             |event| {
                 match event {
@@ -268,26 +280,40 @@ async fn run(app: AndroidApp) {
 
                             if let Some(activeplayer) = &playerbox {
                                 let mut player_lock = activeplayer.player.lock().unwrap();
-                                unsafe {
-                                    let renderer = <dyn Any>::downcast_mut::<WgpuRenderBackend<SwapChainTarget>>(
-                                        player_lock.renderer_mut(),
-                                    )
-                                    .unwrap();
-
-                                    renderer.recreate_surface_unsafe(
-                                        wgpu::SurfaceTargetUnsafe::RawHandle {
-                                            raw_display_handle: Some(RawDisplayHandle::Android(
-                                                AndroidDisplayHandle::new(),
-                                            )),
-                                            raw_window_handle: window
-                                                .window_handle()
-                                                .unwrap()
-                                                .into(),
-                                        },
-                                        (window.width() as u32, window.height() as u32),
-                                    )
-                                    .unwrap();
+                                // Rebuild the swapchain for the new window. The old EGL
+                                // surface is released first (see recreate_surface_unsafe),
+                                // which is what previously caused EGL_BAD_ALLOC. Failure is
+                                // non-fatal: keep the old surface rather than panicking.
+                                let rebuilt = unsafe {
+                                    let renderer = <dyn Any>::downcast_mut::<
+                                        WgpuRenderBackend<SwapChainTarget>,
+                                    >(player_lock.renderer_mut());
+                                    match renderer {
+                                        Some(renderer) => renderer
+                                            .recreate_surface_unsafe(
+                                                wgpu::SurfaceTargetUnsafe::RawHandle {
+                                                    raw_display_handle: Some(
+                                                        RawDisplayHandle::Android(
+                                                            AndroidDisplayHandle::new(),
+                                                        ),
+                                                    ),
+                                                    raw_window_handle: window
+                                                        .window_handle()
+                                                        .unwrap()
+                                                        .into(),
+                                                },
+                                                (window.width() as u32, window.height() as u32),
+                                            )
+                                            .is_ok(),
+                                        None => false,
+                                    }
+                                };
+                                if rebuilt {
+                                    player_lock.set_viewport_dimensions(dimensions);
+                                } else {
+                                    log::warn!("InitWindow surface rebuild failed; keeping old surface");
                                 }
+                                player_lock.render();
                                 player_lock.set_is_playing(true);
                             } else {
                                 let renderer = unsafe {
@@ -333,6 +359,12 @@ async fn run(app: AndroidApp) {
                                 // AAudio on Android 8.0+, OpenSL ES below that.
                                 let player_builder = PlayerBuilder::new()
                                         .with_renderer(renderer)
+                                        // StageQuality::High requests 4x MSAA. At this
+                                        // device's 1920x1200 that costs ~9M samples/frame and
+                                        // made some heavy SWFs take ~1.25s per frame. Low = 1x
+                                        // (no MSAA): a huge win on this GPU for Flash content,
+                                        // which is mostly flat 2D art where MSAA barely shows.
+                                        .with_quality(ruffle_render::quality::StageQuality::Low)
                                         .with_storage(Box::new(DiskStorageBackend::new(android_storage_dir.clone())))
                                         .with_navigator(navigator)
                                         .with_log(FileLogBackend::new(trace_output.as_deref()))
@@ -566,6 +598,65 @@ async fn run(app: AndroidApp) {
             if let Some(player) = playerbox.as_ref() {
                 if let Ok(mut player) = player.player.lock() {
                     player.render();
+                }
+            }
+        }
+
+        // Detect rotation / surface size changes ourselves: rebuild the swapchain
+        // surface for the new size and repaint. On this platform rotation delivers no
+        // InitWindow/WindowResized to us and the old EGL surface goes stale, so merely
+        // resizing the viewport leaves the picture at the old (portrait) shape, which
+        // then looks cropped/overflowing in landscape.
+        if let Some(window) = native_window.as_ref() {
+            let cur = (window.width(), window.height());
+            if cur.0 > 0 && cur.1 > 0 && cur != last_win_size {
+                let first = last_win_size == (0, 0);
+                last_win_size = cur;
+                if !first {
+                    if let Some(player) = playerbox.as_ref() {
+                        if let Ok(mut player) = player.player.lock() {
+                            log::info!("Detected window resize: {} x {} (rebuilding surface)", cur.0, cur.1);
+                            let resized = match window.window_handle() {
+                                Ok(handle) => unsafe {
+                                    let renderer = <dyn Any>::downcast_mut::<
+                                        WgpuRenderBackend<SwapChainTarget>,
+                                    >(player.renderer_mut());
+                                    match renderer {
+                                        Some(renderer) => renderer
+                                            .recreate_surface_unsafe(
+                                                wgpu::SurfaceTargetUnsafe::RawHandle {
+                                                    raw_display_handle: Some(
+                                                        RawDisplayHandle::Android(
+                                                            AndroidDisplayHandle::new(),
+                                                        ),
+                                                    ),
+                                                    raw_window_handle: handle.into(),
+                                                },
+                                                (cur.0 as u32, cur.1 as u32),
+                                            )
+                                            .is_ok(),
+                                        None => false,
+                                    }
+                                },
+                                Err(_) => false,
+                            };
+                            if resized {
+                                let scale_factor = app
+                                    .config()
+                                    .density()
+                                    .map(|dpi| dpi as f64 / 160.0)
+                                    .unwrap_or(1.0);
+                                player.set_viewport_dimensions(ViewportDimensions {
+                                    width: cur.0 as u32,
+                                    height: cur.1 as u32,
+                                    scale_factor,
+                                });
+                                player.render();
+                            } else {
+                                log::warn!("Surface rebuild failed; keeping old surface");
+                            }
+                        }
+                    }
                 }
             }
         }

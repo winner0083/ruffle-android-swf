@@ -39,7 +39,11 @@ pub trait RenderTarget: Debug + 'static {
 
 #[derive(Debug)]
 pub struct SwapChainTarget {
-    window_surface: wgpu::Surface<'static>,
+    // Option so we can drop the underlying EGL surface *before* creating a new
+    // one on the same native window. On Android, eglCreateWindowSurface fails
+    // (EGL_BAD_ALLOC "already connected to another API") if the previous EGL
+    // surface is still alive, which happens on rotation.
+    window_surface: Option<wgpu::Surface<'static>>,
     surface_config: wgpu::SurfaceConfiguration,
 }
 
@@ -93,6 +97,10 @@ impl SwapChainTarget {
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
+            // Keep 2. Setting this to 1 (single-buffer Fifo) makes the EGL
+            // swapchain deadlock on this driver (Tegra K1 / Android 6): the app
+            // re-acquires the surface before the previous present completes and
+            // the GL thread hangs. 2 is the safe value.
             desired_maximum_frame_latency: 2,
             alpha_mode: capabilities.alpha_modes[0],
             view_formats: if linear_format == format {
@@ -104,8 +112,14 @@ impl SwapChainTarget {
         surface.configure(device, &surface_config);
         Self {
             surface_config,
-            window_surface: surface,
+            window_surface: Some(surface),
         }
+    }
+
+    /// Release the EGL surface (and its claim on the native window) so a new
+    /// surface can be created for the same window — required on Android rotation.
+    pub fn release_surface(&mut self) {
+        self.window_surface = None;
     }
 }
 
@@ -115,7 +129,9 @@ impl RenderTarget for SwapChainTarget {
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.surface_config.width = width;
         self.surface_config.height = height;
-        self.window_surface.configure(device, &self.surface_config);
+        if let Some(surface) = &self.window_surface {
+            surface.configure(device, &self.surface_config);
+        }
     }
 
     fn format(&self) -> wgpu::TextureFormat {
@@ -131,7 +147,8 @@ impl RenderTarget for SwapChainTarget {
     }
 
     fn get_next_texture(&mut self) -> Option<Self::Frame> {
-        let texture = match self.window_surface.get_current_texture() {
+        let surface = self.window_surface.as_ref()?;
+        let texture = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
             // The texture is still usable - no reason to waste an already
             // acquired frame. Ideally the surface should also be reconfigured

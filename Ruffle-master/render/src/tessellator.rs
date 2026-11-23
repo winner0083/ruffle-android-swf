@@ -18,6 +18,11 @@ pub struct ShapeTessellator {
     lyon_mesh: VertexBuffers<Vertex, u32>,
     mask_index_count: Option<u32>,
     is_stroke: bool,
+    /// Extra tessellation coarseness applied on top of the caller's `scale`.
+    /// The wgpu backend raises this when the player is at low quality, which
+    /// cuts triangle count dramatically for morph-heavy content (each morph
+    /// frame is re-tessellated).
+    tessellation_scale: f32,
 }
 
 const TESSELLATION_EPSILON: f32 = 0.0000001;
@@ -32,7 +37,14 @@ impl ShapeTessellator {
             lyon_mesh: VertexBuffers::new(),
             mask_index_count: None,
             is_stroke: false,
+            tessellation_scale: 1.0,
         }
+    }
+
+    /// Adjust the coarseness of tessellation. Values > 1.0 tessellate more
+    /// coarsely (fewer triangles). Used for low-quality rendering.
+    pub fn set_tessellation_scale(&mut self, scale: f32) {
+        self.tessellation_scale = scale.max(0.25);
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -164,8 +176,10 @@ impl ShapeTessellator {
                 BuffersBuilder::new(&mut self.lyon_mesh, RuffleVertexCtor { color });
             let result = match path {
                 DrawPath::Fill { winding_rule, .. } => {
-                    // Larger scales require more precise tessellation to avoid artifacts
-                    let tolerance = FillOptions::DEFAULT_TOLERANCE / scale;
+                    // Larger scales require more precise tessellation to avoid artifacts.
+                    // Low-quality mode additionally coarsens the mesh (tessellation_scale).
+                    let effective_scale = scale * self.tessellation_scale;
+                    let tolerance = FillOptions::DEFAULT_TOLERANCE / effective_scale;
                     self.fill_tess.tessellate_path(
                         &lyon_path,
                         &FillOptions::default()
@@ -186,7 +200,8 @@ impl ShapeTessellator {
                     let width = width.max(min_screen_width);
 
                     // Larger scales require more precise tessellation to avoid artifacts
-                    let tolerance = StrokeOptions::DEFAULT_TOLERANCE / scale;
+                    let effective_scale = scale * self.tessellation_scale;
+                    let tolerance = StrokeOptions::DEFAULT_TOLERANCE / effective_scale;
                     let mut stroke_options = StrokeOptions::default()
                         .with_line_width(width)
                         .with_tolerance(tolerance)

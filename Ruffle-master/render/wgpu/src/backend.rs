@@ -167,6 +167,10 @@ impl WgpuRenderBackend<SwapChainTarget> {
         size: (u32, u32),
     ) -> Result<(), Error> {
         let descriptors = &self.descriptors;
+        // Drop the old EGL surface BEFORE creating a new one on the same native
+        // window. Otherwise eglCreateWindowSurface fails with EGL_BAD_ALLOC
+        // ("already connected to another API") on Android after a rotation.
+        self.target.release_surface();
         let surface = unsafe { descriptors.wgpu_instance.create_surface_unsafe(window)? };
         self.target =
             SwapChainTarget::new(surface, &descriptors.adapter, size, &descriptors.device);
@@ -513,6 +517,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.surface.size().height,
             self.target.format(),
         );
+        // Low quality: coarsen tessellation (fewer triangles). Morph-heavy SWFs
+        // re-tessellate every frame and this is where their render cost goes.
+        let tess_scale = if matches!(quality, StageQuality::Low) { 4.0 } else { 1.0 };
+        self.shape_tessellator.set_tessellation_scale(tess_scale);
     }
 
     fn viewport_dimensions(&self) -> ViewportDimensions {
